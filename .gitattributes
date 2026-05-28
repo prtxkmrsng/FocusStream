@@ -1,2 +1,14 @@
-# Auto detect text files and perform LF normalization
+# Set default behavior to automatically normalize line endings
 * text=auto
+
+# Explicitly declare text files you want always normalized to LF on check-in
+*.py text eol=lf
+*.html text eol=lf
+*.json text eol=lf
+*.xml text eol=lf
+
+# Denote binary files/models that should not be touched by text normalization
+*.xml binary
+*.json binary
+*.png binary
+*.jpg binary
