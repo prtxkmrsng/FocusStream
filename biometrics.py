@@ -1,64 +1,80 @@
 import cv2
 import numpy as np
+import math
+import os
+import urllib.request
+import mediapipe as mp
+from mediapipe.tasks import python
+from mediapipe.tasks.python import vision
 
-# Load our local structural landmark detectors
-face_cascade = cv2.CascadeClassifier('haarcascade_frontalface_default.xml')
-eye_cascade = cv2.CascadeClassifier('haarcascade_eye.xml')
+# 1. Auto-Download the modern Task API model from Google
+MODEL_PATH = 'face_landmarker.task'
+if not os.path.exists(MODEL_PATH):
+    print("[System] Downloading Google's modern Face Landmarker model...")
+    url = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
+    urllib.request.urlretrieve(url, MODEL_PATH)
+    print("[System] Download complete!")
 
-def extract_live_biometrics(frame) -> tuple:
+# 2. Initialize the modern Tasks API (Completely bypasses mp.solutions!)
+base_options = python.BaseOptions(model_asset_path=MODEL_PATH)
+options = vision.FaceLandmarkerOptions(
+    base_options=base_options,
+    output_face_blendshapes=False,
+    output_facial_transformation_matrixes=False,
+    num_faces=1
+)
+detector = vision.FaceLandmarker.create_from_options(options)
+
+def calculate_distance(point1, point2):
+    """Calculates pixel distance between two dots."""
+    return math.hypot(point2[0] - point1[0], point2[1] - point1[1])
+
+def extract_live_biometrics(frame):
     """
-    Parses an OpenCV image matrix to extract tracking landmarks.
-    Returns: (processed_frame, feature_list)
+    Extracts high-precision facial landmarks using the modern Tasks API.
+    Returns: (processed_frame, [ear, blink_duration, mar, head_deviation])
     """
     if frame is None:
-        return None, [0.34, 0.12, 0.08, 0.04] # Baseline fallback safe array
+        return None, None
 
-    # Convert to grayscale for Haar processing cascade operations
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    faces = face_cascade.detectMultiScale(gray, 1.3, 5)
+    h, w, _ = frame.shape
     
-    # Initialize baseline metrics (representing our focused state)
-    ear = 0.34
-    blink_duration = 0.12
-    mar = 0.08
-    head_deviation = 0.04
+    # 3. Task API requires a specific MediaPipe Image object
+    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+    
+    # 4. Detect faces
+    detection_result = detector.detect(mp_image)
 
-    for (x, y, w, h) in faces:
-        # Draw bounding rectangle around detected face
-        cv2.rectangle(frame, (x, y), (x+w, y+h), (255, 0, 0), 2)
-        
-        # Calculate dynamic head pose variance based on center bounding box movement
-        # (Simulating real roll/yaw tracker deviations mathematically)
-        head_deviation = abs(0.5 - (x + w/2) / frame.shape[1])
-        
-        # Region of Interest (ROI) isolated on face region for eye hunting
-        roi_gray = gray[y:y+h, x:x+w]
-        roi_color = frame[y:y+h, x:x+w]
-        
-        eyes = eye_cascade.detectMultiScale(roi_gray, 1.1, 3, minSize=(30, 30))
-        
-        if len(eyes) >= 2:
-            # We have both eyes tracked successfully!
-            # Draw rectangles and calculate mock real-time Eye Aspect Ratio (EAR)
-            for (ex, ey, ew, eh) in eyes[:2]:
-                cv2.rectangle(roi_color, (ex, ey), (ex+ew, ey+eh), (0, 255, 0), 2)
-            
-            # Simulate real-time biological adjustments
-            # Lower eye height detection relative to width translates to dropping EAR
-            eye_widths = [ew for (_, _, ew, _) in eyes[:2]]
-            eye_heights = [eh for (_, _, _, eh) in eyes[:2]]
-            avg_ratio = np.mean(eye_heights) / np.mean(eye_widths)
-            
-            # Map structural measurements cleanly to model parameters
-            ear = float(np.clip(avg_ratio * 0.5, 0.15, 0.40))
-            
-            if ear < 0.24:
-                # Prolonged low ear reading registers micro-naps
-                blink_duration = 0.55
-                mar = 0.35 # Fatigue yawns
-            else:
-                blink_duration = 0.11
+    if not detection_result.face_landmarks:
+        return None, None # No face found
 
-    # Format the explicit feature array order matching training setup
-    features = [ear, blink_duration, mar, head_deviation]
-    return frame, features
+    # 5. Extract the 468 precise coordinates
+    landmarks = detection_result.face_landmarks[0]
+
+    def get_pt(index):
+        return [int(landmarks[index].x * w), int(landmarks[index].y * h)]
+
+    # --- 1. PRECISE EYE ASPECT RATIO (EAR) ---
+    left_h = calculate_distance(get_pt(159), get_pt(145))
+    left_w = calculate_distance(get_pt(33), get_pt(133))
+    left_ear = left_h / (left_w + 1e-6)
+
+    right_h = calculate_distance(get_pt(386), get_pt(374))
+    right_w = calculate_distance(get_pt(362), get_pt(263))
+    right_ear = right_h / (right_w + 1e-6)
+
+    ear = (left_ear + right_ear) / 2.0
+
+    # --- 2. PRECISE MOUTH ASPECT RATIO (MAR) ---
+    mouth_h = calculate_distance(get_pt(13), get_pt(14))
+    mouth_w = calculate_distance(get_pt(78), get_pt(308))
+    mar = mouth_h / (mouth_w + 1e-6)
+
+    # --- 3. HEAD DEVIATION ---
+    nose_x = landmarks[1].x
+    head_deviation = abs(0.5 - nose_x)
+    
+    blink_duration = 0.55 if ear < 0.20 else 0.11
+
+    return frame, [ear, blink_duration, mar, head_deviation]

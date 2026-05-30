@@ -30,6 +30,8 @@ venv/
 ENV/
 env/
 .env
+raw_data/
+
 
 # XGBoost Model Artifacts & Data Logs
 focus_model.json
